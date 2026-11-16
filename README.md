@@ -1,20 +1,11 @@
-# Rockstarlang (v0.1)
+# Rockstarlang (v0.2)
 
-A Rockstar Games-inspired esoteric programming language and custom transpiler built from scratch in pure Python. Designed around GTA and RDR mechanics, cheat codes, and mission-based control flow.
+A Rockstar Games-inspired esoteric programming language and custom transpiler built from scratch in pure Python. Designed around GTA and RDR mechanics, mission blocks, and cheat-code syntax.
 
-> **Note:** Built and tested entirely on an Android mobile workflow (**Termux + Acode + Pydroid 3**) without a PC setup.
+> **Note:** Built, tested, and maintained entirely on an Android mobile development workflow (**Termux + Acode**) without a PC setup.
 
-## Current Progress (`v0.1 - Initial Lexer`)
-- **Lexical Analyzer (`cal1.py`):** Tokenizes integers, floats, basic arithmetic operators (`+`, `-`, `*`, `/`), and parentheses.
-- **Whitespace Handling:** Ignores spaces and tabs during scanning.
-- **Custom Error Handling:** Modular `Error` base class with `IllegalCharError` detection.
-- **Interactive Shell (`shell.py`):** Command-line REPL loop to test live tokenization.
-
-## Roadmap (Target Launch: Nov 19, 2026)
-- [x] **v0.1:** Core Lexer, number/operator tokenization, and error classes
-- [ ] **v0.2:** Identifier and Rockstar keyword recognition (`WASTED`, `HESOYAM`, `MISSION_PASSED`, etc.)
-- [ ] **v0.3:** Parser and syntax rules
-- [ ] **v1.0:** Python transpilation engine and playable sample scripts
-
-## Author
-**Priyanshu Mishra** (Class 9)
+## Example Syntax (`.rsl`)
+```text
+GTA52013
+    call_CJ ("Hello Los Santos", 4 + 10)
+GTA62026
