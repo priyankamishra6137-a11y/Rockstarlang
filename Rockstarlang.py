@@ -1,15 +1,13 @@
 import sys
-import Core  # Aapki Lexer/Parser wali file
+import Core 
 
 def main():
-    # Check karo ki user ne command mein file ka naam diya hai ya nahi
     if len(sys.argv) < 2:
         print("Usage: python rockstarlang.py <filename.rsl>")
         return
 
     filename = sys.argv[1]
 
-    # Extension check (.rsl hona zaroori hai)
     if not filename.endswith('.rsl'):
         print("WASTED! File must have a .rsl extension.")
         return
@@ -26,8 +24,6 @@ def main():
 
     if error:
         print(error)
-    else:
-        print(result)
 
 if __name__ == '__main__':
     main()
