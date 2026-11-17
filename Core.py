@@ -1,3 +1,21 @@
+"""
+Rockstarlang Core Engine (v0.5 - Phase 2: OOP & Standard Libraries)
+------------------------------------------------------------------
+A Rockstar Games-inspired esoteric programming language pipeline built from scratch.
+Implements a three-stage execution architecture:
+    1. Lexer       : Converts raw .rsl source code into a stream of lexical tokens.
+    2. Parser      : Validates block grammar (GTA52013...GTA62026) and constructs an AST.
+    3. Interpreter : Walks the AST with scoped memory, OOP instances, and native modules.
+"""
+
+import os
+import sys
+import math
+import time
+import json
+import random
+import threading
+
 # ==============================================================================
 # 1. CONSTANTS & TOKEN DEFINITIONS
 # ==============================================================================
@@ -27,6 +45,7 @@ TT_CLPAREN = 'CLPAREN'
 TT_CRPAREN = 'CRPAREN'
 TT_COMMA = 'COMMA'
 TT_COLON = 'COLON'
+TT_DOT = 'DOT'
 TT_EQ = 'EQ'
 TT_EQUAL = 'EQUAL'
 TT_NOT_EQUAL = 'NOT_EQUAL'
@@ -49,7 +68,7 @@ KEYWORDS = {
     'GTA62026',
     'call_CJ',
     'heist',        # Variable declaration & assignment
-    'new_mission',  # Function definition
+    'new_mission',  # Function / method definition
     'ask_Lester',
     'wanted',
     'heat_up',
@@ -59,7 +78,11 @@ KEYWORDS = {
     'evade',
     'loot',
     'stash',
-    'dossier'
+    'dossier',
+    'gang',         # Class definition
+    'blueprint',    # Struct definition
+    'recruit',      # Object instantiation
+    'hire',         # Module / .rsl import
 }
 
 
@@ -168,6 +191,10 @@ class Lexer:
                 tokens.append(Token(TT_COLON))
                 self.advance()
 
+            elif self.current_char == '.':
+                tokens.append(Token(TT_DOT))
+                self.advance()
+
             elif self.current_char in LETTERS:
                 word_tok = self.make_word()
                 if word_tok is not None:
@@ -243,11 +270,9 @@ class Lexer:
                 space_count += 1
             self.advance()
 
-        # Ignore whitespace-only blank lines
         if self.current_char == '\n' or self.current_char is None:
             return None, None
 
-        # Ignore full-line 'RDR2' comments even when indented
         if self.text[self.pos:self.pos + 4] == 'RDR2' and (
             self.pos + 4 >= len(self.text) or self.text[self.pos + 4] not in LETTERS_DIGITS
         ):
@@ -268,7 +293,6 @@ class Lexer:
             word_str += self.current_char
             self.advance()
 
-        # Single-line comment trigger: skip everything until newline
         if word_str == 'RDR2':
             while self.current_char is not None and self.current_char != '\n':
                 self.advance()
@@ -278,7 +302,6 @@ class Lexer:
         return Token(tok_type, word_str)
 
     def make_equals(self):
-        """Distinguishes assignment '=' from equality comparison '=='."""
         self.advance()
         if self.current_char == '=':
             self.advance()
@@ -286,7 +309,6 @@ class Lexer:
         return Token(TT_EQ)
 
     def make_not_equals(self):
-        """Validates and tokenizes inequality comparison '!='."""
         err_line = self.line
         self.advance()
         if self.current_char == '=':
@@ -295,7 +317,6 @@ class Lexer:
         return None, f"WASTED! Expected '=' after '!' at Line {err_line}"
 
     def make_less_than(self):
-        """Distinguishes '<' from '<='."""
         self.advance()
         if self.current_char == '=':
             self.advance()
@@ -303,7 +324,6 @@ class Lexer:
         return Token(TT_LESS_THEN)
 
     def make_greater_than(self):
-        """Distinguishes '>' from '>='."""
         self.advance()
         if self.current_char == '=':
             self.advance()
@@ -311,7 +331,6 @@ class Lexer:
         return Token(TT_GREATER_THAN)
 
     def make_number(self):
-        """Scans integer and floating-point numeric literals."""
         num_str = ''
         dot_count = 0
 
@@ -330,7 +349,6 @@ class Lexer:
         return Token(TT_FLOAT, float(num_str))
 
     def make_string(self):
-        """Scans single or double-quoted string literals."""
         quote_char = self.current_char
         err_line = self.line
         string_val = ''
@@ -352,8 +370,6 @@ class Lexer:
 # ==============================================================================
 
 class NumberNode:
-    """AST node representing a numeric literal (INT or FLOAT)."""
-
     def __init__(self, tok):
         self.tok = tok
 
@@ -362,8 +378,6 @@ class NumberNode:
 
 
 class StringNode:
-    """AST node representing a string literal."""
-
     def __init__(self, tok):
         self.tok = tok
 
@@ -372,8 +386,6 @@ class StringNode:
 
 
 class ListNode:
-    """AST node representing a 'stash[...]' array literal."""
-
     def __init__(self, element_nodes):
         self.element_nodes = element_nodes
 
@@ -382,8 +394,6 @@ class ListNode:
 
 
 class DictNode:
-    """AST node representing a 'dossier{key: val, ...}' dictionary literal."""
-
     def __init__(self, pair_nodes):
         self.pair_nodes = pair_nodes
 
@@ -392,8 +402,6 @@ class DictNode:
 
 
 class IndexAccessNode:
-    """AST node representing list/dict indexing: target[key_or_index]"""
-
     def __init__(self, target_node, index_node):
         self.target_node = target_node
         self.index_node = index_node
@@ -403,20 +411,73 @@ class IndexAccessNode:
 
 
 class IndexAssignNode:
-    """AST node representing list/dict element assignment: heist x[k] = <expr>"""
-
-    def __init__(self, var_name_tok, index_node, value_node):
-        self.var_name_tok = var_name_tok
+    def __init__(self, target_node, index_node, value_node):
+        self.target_node = target_node
         self.index_node = index_node
         self.value_node = value_node
 
     def __repr__(self):
-        return f'(SET {self.var_name_tok.value}[{self.index_node}] = {self.value_node})'
+        return f'(SET {self.target_node}[{self.index_node}] = {self.value_node})'
+
+
+class MemberAccessNode:
+    def __init__(self, target_node, member_tok):
+        self.target_node = target_node
+        self.member_tok = member_tok
+
+    def __repr__(self):
+        return f'{self.target_node}.{self.member_tok.value}'
+
+
+class MemberAssignNode:
+    def __init__(self, target_node, member_tok, value_node):
+        self.target_node = target_node
+        self.member_tok = member_tok
+        self.value_node = value_node
+
+    def __repr__(self):
+        return f'(SET {self.target_node}.{self.member_tok.value} = {self.value_node})'
+
+
+class StructDefNode:
+    def __init__(self, struct_name_tok, field_toks):
+        self.struct_name_tok = struct_name_tok
+        self.field_toks = field_toks
+
+    def __repr__(self):
+        return f'BLUEPRINT {self.struct_name_tok.value}({self.field_toks})'
+
+
+class ClassDefNode:
+    def __init__(self, class_name_tok, method_nodes):
+        self.class_name_tok = class_name_tok
+        self.method_nodes = method_nodes
+
+    def __repr__(self):
+        return f'GANG {self.class_name_tok.value}'
+
+
+class RecruitNode:
+    def __init__(self, class_name_tok, arg_nodes):
+        self.class_name_tok = class_name_tok
+        self.arg_nodes = arg_nodes
+
+    def __repr__(self):
+        return f'RECRUIT {self.class_name_tok.value}({self.arg_nodes})'
+
+
+class HireNode:
+    """AST node representing 'hire <module>' or 'hire "file.rsl"' import statements."""
+
+    def __init__(self, target_tok, is_file=False):
+        self.target_tok = target_tok
+        self.is_file = is_file
+
+    def __repr__(self):
+        return f'HIRE({self.target_tok.value})'
 
 
 class BinOpNode:
-    """AST node representing a binary arithmetic or comparison operation."""
-
     def __init__(self, left_node, op_tok, right_node):
         self.left_node = left_node
         self.op_tok = op_tok
@@ -427,8 +488,6 @@ class BinOpNode:
 
 
 class PrintNode:
-    """AST node representing a 'call_CJ' output statement."""
-
     def __init__(self, arg_nodes):
         self.arg_nodes = arg_nodes
 
@@ -437,8 +496,6 @@ class PrintNode:
 
 
 class VarAssignNode:
-    """AST node representing variable assignment: heist x = <expr>"""
-
     def __init__(self, var_name_tok, value_node):
         self.var_name_tok = var_name_tok
         self.value_node = value_node
@@ -448,8 +505,6 @@ class VarAssignNode:
 
 
 class VarAccessNode:
-    """AST node representing variable lookup inside expressions."""
-
     def __init__(self, var_name_tok):
         self.var_name_tok = var_name_tok
 
@@ -458,8 +513,6 @@ class VarAccessNode:
 
 
 class InputNode:
-    """AST node representing user input: ask_Lester("prompt")"""
-
     def __init__(self, prompt_node=None):
         self.prompt_node = prompt_node
 
@@ -468,8 +521,6 @@ class InputNode:
 
 
 class IfNode:
-    """AST node representing wanted / heat_up / lay_low conditional branching."""
-
     def __init__(self, cases, else_case=None):
         self.cases = cases
         self.else_case = else_case
@@ -479,8 +530,6 @@ class IfNode:
 
 
 class WhileNode:
-    """AST node representing an 'on_the_run <cond>:' loop."""
-
     def __init__(self, condition_node, body_nodes):
         self.condition_node = condition_node
         self.body_nodes = body_nodes
@@ -490,18 +539,14 @@ class WhileNode:
 
 
 class BreakNode:
-    """AST node representing 'busted' (break out of loop)."""
     pass
 
 
 class ContinueNode:
-    """AST node representing 'evade' (skip to next loop iteration)."""
     pass
 
 
 class FuncDefNode:
-    """AST node representing a 'new_mission name(arg1, arg2):' function definition."""
-
     def __init__(self, func_name_tok, arg_name_toks, body_nodes):
         self.func_name_tok = func_name_tok
         self.arg_name_toks = arg_name_toks
@@ -512,8 +557,6 @@ class FuncDefNode:
 
 
 class FuncCallNode:
-    """AST node representing a function call: target(arg1, arg2, ...)"""
-
     def __init__(self, node_to_call, arg_nodes):
         self.node_to_call = node_to_call
         self.arg_nodes = arg_nodes
@@ -523,8 +566,6 @@ class FuncCallNode:
 
 
 class ReturnNode:
-    """AST node representing 'loot <expr>' return statement."""
-
     def __init__(self, value_node=None):
         self.value_node = value_node
 
@@ -546,13 +587,11 @@ class Parser:
         self.advance()
 
     def advance(self):
-        """Moves the parser pointer to the next token in the stream."""
         self.tok_idx += 1
         self.current_tok = self.tokens[self.tok_idx] if self.tok_idx < len(self.tokens) else None
         return self.current_tok
 
     def skip_newlines(self):
-        """Consumes consecutive newline tokens between statements or blocks."""
         while self.current_tok is not None and self.current_tok.type == TT_NEWLINE:
             self.advance()
 
@@ -645,36 +684,47 @@ class Parser:
 
             return PrintNode(arg_nodes), None
 
-        # 2. Variable / List / Dict Element Assignment: heist x = <expr> or heist x[k] = <expr>
+        # 2. Variable / Member / Index Assignment: heist x = <expr>
         if self.current_tok.type == TT_KEYWORD and self.current_tok.value == 'heist':
             self.advance()
 
             if self.current_tok.type != TT_IDENTIFIER:
-                return None, "WASTED! Expected variable name after 'heist'"
-            var_name = self.current_tok
+                return None, "WASTED! Expected target name after 'heist'"
+            target_node = VarAccessNode(self.current_tok)
+            root_tok = self.current_tok
             self.advance()
 
-            index_node = None
-            if self.current_tok.type == TT_LSQUARE:
-                self.advance()
-                index_node, error = self.expr()
-                if error:
-                    return None, error
-                if self.current_tok.type != TT_RSQUARE:
-                    return None, "WASTED! Expected ']' after key/index"
-                self.advance()
+            while self.current_tok is not None and self.current_tok.type in (TT_DOT, TT_LSQUARE):
+                if self.current_tok.type == TT_DOT:
+                    self.advance()
+                    if self.current_tok.type != TT_IDENTIFIER:
+                        return None, "WASTED! Expected field name after '.'"
+                    member_tok = self.current_tok
+                    self.advance()
+                    target_node = MemberAccessNode(target_node, member_tok)
+                elif self.current_tok.type == TT_LSQUARE:
+                    self.advance()
+                    index_node, error = self.expr()
+                    if error:
+                        return None, error
+                    if self.current_tok.type != TT_RSQUARE:
+                        return None, "WASTED! Expected ']' after key/index"
+                    self.advance()
+                    target_node = IndexAccessNode(target_node, index_node)
 
             if self.current_tok.type != TT_EQ:
-                return None, f"WASTED! Expected '=' after '{var_name.value}'"
+                return None, "WASTED! Expected '=' in 'heist' assignment"
             self.advance()
 
             val_node, error = self.expr()
             if error:
                 return None, error
 
-            if index_node is not None:
-                return IndexAssignNode(var_name, index_node, val_node), None
-            return VarAssignNode(var_name, val_node), None
+            if isinstance(target_node, MemberAccessNode):
+                return MemberAssignNode(target_node.target_node, target_node.member_tok, val_node), None
+            if isinstance(target_node, IndexAccessNode):
+                return IndexAssignNode(target_node.target_node, target_node.index_node, val_node), None
+            return VarAssignNode(root_tok, val_node), None
 
         # 3. Conditional Branching: wanted / heat_up / lay_low
         if self.current_tok.type == TT_KEYWORD and self.current_tok.value == 'wanted':
@@ -707,14 +757,90 @@ class Parser:
                 return ReturnNode(val_node), None
             return ReturnNode(None), None
 
-        # 8. Standalone Expression / Function Call Statement (e.g., my_mission(10, 20))
+        # 8. Struct Definition: blueprint Name(field1, field2)
+        if self.current_tok.type == TT_KEYWORD and self.current_tok.value == 'blueprint':
+            return self.struct_def()
+
+        # 9. Class Definition: gang Name:
+        if self.current_tok.type == TT_KEYWORD and self.current_tok.value == 'gang':
+            return self.class_def(indent_level)
+
+        # 10. Module / File Import: hire math | hire "weapons.rsl"
+        if self.current_tok.type == TT_KEYWORD and self.current_tok.value == 'hire':
+            self.advance()
+            if self.current_tok.type == TT_IDENTIFIER:
+                mod_tok = self.current_tok
+                self.advance()
+                return HireNode(mod_tok, is_file=False), None
+            if self.current_tok.type == TT_STRING:
+                file_tok = self.current_tok
+                self.advance()
+                return HireNode(file_tok, is_file=True), None
+            return None, "WASTED! Expected module name or '.rsl' file string after 'hire'"
+
+        # 11. Standalone Expression / Method or Function Call
         expr_node, error = self.expr()
         if error:
             return None, error
         return expr_node, None
 
+    def struct_def(self):
+        self.advance()
+
+        if self.current_tok.type != TT_IDENTIFIER:
+            return None, "WASTED! Expected struct name after 'blueprint'"
+        struct_name_tok = self.current_tok
+        self.advance()
+
+        if self.current_tok.type != TT_LPAREN:
+            return None, f"WASTED! Expected '(' after '{struct_name_tok.value}'"
+        self.advance()
+
+        field_toks = []
+        if self.current_tok.type == TT_IDENTIFIER:
+            field_toks.append(self.current_tok)
+            self.advance()
+
+            while self.current_tok.type == TT_COMMA:
+                self.advance()
+                if self.current_tok.type != TT_IDENTIFIER:
+                    return None, "WASTED! Expected field name after ','"
+                field_toks.append(self.current_tok)
+                self.advance()
+
+        if self.current_tok.type != TT_RPAREN:
+            return None, "WASTED! Expected ')' after blueprint fields"
+        self.advance()
+
+        return StructDefNode(struct_name_tok, field_toks), None
+
+    def class_def(self, indent_level):
+        self.advance()
+
+        if self.current_tok.type != TT_IDENTIFIER:
+            return None, "WASTED! Expected gang (class) name after 'gang'"
+        class_name_tok = self.current_tok
+        self.advance()
+
+        if self.current_tok.type != TT_COLON:
+            return None, f"WASTED! Expected ':' after 'gang {class_name_tok.value}'"
+        self.advance()
+
+        if self.current_tok.type != TT_NEWLINE:
+            return None, "WASTED! Expected newline after ':'"
+        self.skip_newlines()
+
+        body_nodes, error = self.parse_block(indent_level + 1)
+        if error:
+            return None, error
+
+        for node in body_nodes:
+            if not isinstance(node, FuncDefNode):
+                return None, f"WASTED! Only 'new_mission' methods allowed inside 'gang {class_name_tok.value}'"
+
+        return ClassDefNode(class_name_tok, body_nodes), None
+
     def if_expr(self, indent_level):
-        """Parses 'wanted <cond>:', optional 'heat_up <cond>:', and optional 'lay_low:' blocks."""
         cases = []
         else_case = None
 
@@ -790,7 +916,6 @@ class Parser:
         return IfNode(cases, else_case), None
 
     def while_expr(self, indent_level):
-        """Parses 'on_the_run <condition>:' loop blocks."""
         self.advance()
         condition, error = self.expr()
         if error:
@@ -811,8 +936,7 @@ class Parser:
         return WhileNode(condition, body), None
 
     def func_def(self, indent_level):
-        """Parses 'new_mission func_name(param1, param2):' function definitions."""
-        self.advance()  # Consume 'new_mission'
+        self.advance()
 
         if self.current_tok.type != TT_IDENTIFIER:
             return None, "WASTED! Expected mission (function) name after 'new_mission'"
@@ -854,7 +978,6 @@ class Parser:
         return FuncDefNode(func_name_tok, arg_name_toks, body), None
 
     def list_expr(self):
-        """Parses 'stash[elem1, elem2, ...]' array literals."""
         self.advance()
 
         if self.current_tok.type != TT_LSQUARE:
@@ -882,7 +1005,6 @@ class Parser:
         return ListNode(elements), None
 
     def dict_expr(self):
-        """Parses 'dossier{key: value, ...}' dictionary literals."""
         self.advance()
 
         if self.current_tok.type != TT_CLPAREN:
@@ -921,10 +1043,41 @@ class Parser:
 
         return DictNode(pairs), None
 
-    # --- Expression Grammar (BODMAS, Postfix Calls/Indexing & Comparison) ---
+    def recruit_expr(self):
+        self.advance()
+
+        if self.current_tok.type != TT_IDENTIFIER:
+            return None, "WASTED! Expected gang or blueprint name after 'recruit'"
+        class_name_tok = self.current_tok
+        self.advance()
+
+        if self.current_tok.type != TT_LPAREN:
+            return None, f"WASTED! Expected '(' after '{class_name_tok.value}'"
+        self.advance()
+
+        arg_nodes = []
+        if self.current_tok.type != TT_RPAREN:
+            arg, error = self.expr()
+            if error:
+                return None, error
+            arg_nodes.append(arg)
+
+            while self.current_tok.type == TT_COMMA:
+                self.advance()
+                arg, error = self.expr()
+                if error:
+                    return None, error
+                arg_nodes.append(arg)
+
+        if self.current_tok.type != TT_RPAREN:
+            return None, "WASTED! Expected ')' after recruit arguments"
+        self.advance()
+
+        return RecruitNode(class_name_tok, arg_nodes), None
+
+    # --- Expression Grammar (BODMAS, Postfix Calls/Indexing/Dot & Comparison) ---
 
     def atom(self):
-        """Parses atomic values: literals, variables, stash, dossier, ask_Lester, parens."""
         tok = self.current_tok
 
         if tok.type in (TT_INT, TT_FLOAT):
@@ -944,6 +1097,9 @@ class Parser:
 
         if tok.type == TT_KEYWORD and tok.value == 'dossier':
             return self.dict_expr()
+
+        if tok.type == TT_KEYWORD and tok.value == 'recruit':
+            return self.recruit_expr()
 
         if tok.type == TT_KEYWORD and tok.value == 'ask_Lester':
             self.advance()
@@ -975,12 +1131,11 @@ class Parser:
         return None, f"WASTED! Expected value, variable, or '(', got '{tok}'"
 
     def postfix(self):
-        """Handles chained indexing arr[i] and function calls func(a, b)."""
         node, error = self.atom()
         if error:
             return None, error
 
-        while self.current_tok is not None and self.current_tok.type in (TT_LSQUARE, TT_LPAREN):
+        while self.current_tok is not None and self.current_tok.type in (TT_LSQUARE, TT_LPAREN, TT_DOT):
             if self.current_tok.type == TT_LSQUARE:
                 self.advance()
                 index_node, error = self.expr()
@@ -990,6 +1145,14 @@ class Parser:
                     return None, "WASTED! Expected ']' after key/index"
                 self.advance()
                 node = IndexAccessNode(node, index_node)
+
+            elif self.current_tok.type == TT_DOT:
+                self.advance()
+                if self.current_tok.type != TT_IDENTIFIER:
+                    return None, "WASTED! Expected member name after '.'"
+                member_tok = self.current_tok
+                self.advance()
+                node = MemberAccessNode(node, member_tok)
 
             elif self.current_tok.type == TT_LPAREN:
                 self.advance()
@@ -1008,14 +1171,13 @@ class Parser:
                         arg_nodes.append(arg)
 
                 if self.current_tok.type != TT_RPAREN:
-                    return None, "WASTED! Expected ')' after mission arguments"
+                    return None, "WASTED! Expected ')' after arguments"
                 self.advance()
                 node = FuncCallNode(node, arg_nodes)
 
         return node, None
 
     def factor(self):
-        """Handles unary +/- signs before postfix expressions."""
         tok = self.current_tok
 
         if tok.type in (TT_PLUS, TT_MINUS):
@@ -1028,22 +1190,18 @@ class Parser:
         return self.postfix()
 
     def term(self):
-        """Parses high-precedence multiplicative operations (* and /)."""
         return self.bin_op(self.factor, (TT_MUL, TT_DIV))
 
     def arith_expr(self):
-        """Parses additive arithmetic operations (+ and -)."""
         return self.bin_op(self.term, (TT_PLUS, TT_MINUS))
 
     def expr(self):
-        """Parses comparison operations (==, !=, <, >, <=, >=)."""
         return self.bin_op(
             self.arith_expr,
             (TT_EQUAL, TT_NOT_EQUAL, TT_LESS_THEN, TT_GREATER_THAN, TT_LESS_EQUAL, TT_GREATER_EQUAL)
         )
 
     def bin_op(self, func, ops):
-        """Helper method for left-associative binary operator parsing."""
         left, error = func()
         if error:
             return None, error
@@ -1060,44 +1218,235 @@ class Parser:
 
 
 # ==============================================================================
-# 6. RUNTIME FUNCTION & TREE-WALK INTERPRETER
+# 6. RUNTIME OBJECTS, NATIVE MODULES & TREE-WALK INTERPRETER
 # ==============================================================================
 
 class RockstarFunction:
-    """Represents a user-defined 'new_mission' function at runtime."""
+    """Represents a user-defined 'new_mission' function or bound method at runtime."""
 
-    def __init__(self, name, arg_names, body_nodes):
+    def __init__(self, name, arg_names, body_nodes, bound_instance=None):
         self.name = name
         self.arg_names = arg_names
         self.body_nodes = body_nodes
+        self.bound_instance = bound_instance
 
     def __repr__(self):
         return f'<new_mission {self.name}>'
 
 
-class Interpreter:
-    """Traverses the AST and executes Rockstarlang statements with scoped memory."""
+class NativeFunction:
+    """Wraps a built-in Python callable for Rockstarlang standard modules."""
 
-    def __init__(self):
+    def __init__(self, name, py_func):
+        self.name = name
+        self.py_func = py_func
+
+    def __repr__(self):
+        return f'<native_mission {self.name}>'
+
+
+class RockstarModule:
+    """Represents a standard library module imported via 'hire'."""
+
+    def __init__(self, name, members):
+        self.name = name
+        self.members = members  # dict: member_name -> NativeFunction or constant
+
+    def __repr__(self):
+        return f'<module {self.name}>'
+
+
+class RockstarStruct:
+    def __init__(self, name, field_names):
+        self.name = name
+        self.field_names = field_names
+
+    def __repr__(self):
+        return f'<blueprint {self.name}>'
+
+
+class RockstarClass:
+    def __init__(self, name, methods):
+        self.name = name
+        self.methods = methods
+
+    def __repr__(self):
+        return f'<gang {self.name}>'
+
+
+class RockstarInstance:
+    def __init__(self, type_name, methods=None, initial_fields=None):
+        self.type_name = type_name
+        self.methods = methods or {}
+        self.fields = initial_fields or {}
+
+    def __repr__(self):
+        return f'<{self.type_name} {self.fields}>'
+
+
+class Interpreter:
+    """Traverses the AST and executes Rockstarlang statements with scoped memory, OOP & modules."""
+
+    def __init__(self, base_dir="."):
+        self.base_dir = base_dir
         self.global_symbols = {}
         self.scope_stack = [self.global_symbols]
+        self._last_frame_time = time.perf_counter()
 
     @property
     def current_scope(self):
         return self.scope_stack[-1]
 
     def get_var(self, name):
-        """Looks up a variable from innermost local scope out to global scope."""
         for scope in reversed(self.scope_stack):
             if name in scope:
                 return scope[name], True
         return None, False
 
+    def _build_stdlib_module(self, mod_name):
+        """Constructs game-dev friendly native modules for 'hire <module>'."""
+        if mod_name == 'math':
+            return RockstarModule('math', {
+                'pi': math.pi,
+                'sin': NativeFunction('math.sin', lambda x: math.sin(x)),
+                'cos': NativeFunction('math.cos', lambda x: math.cos(x)),
+                'sqrt': NativeFunction('math.sqrt', lambda x: math.sqrt(x)),
+                'abs': NativeFunction('math.abs', lambda x: abs(x)),
+                'floor': NativeFunction('math.floor', lambda x: math.floor(x)),
+                'ceil': NativeFunction('math.ceil', lambda x: math.ceil(x)),
+                'dist': NativeFunction('math.dist', lambda x1, y1, x2, y2: math.hypot(x2 - x1, y2 - y1)),
+                'rand': NativeFunction(
+                    'math.rand',
+                    lambda lo, hi: random.randint(lo, hi) if isinstance(lo, int) and isinstance(hi, int) else random.uniform(lo, hi)
+                ),
+                'clamp': NativeFunction('math.clamp', lambda val, lo, hi: max(lo, min(hi, val))),
+            }), None
+
+        if mod_name == 'time':
+            def fps_limiter(target_fps):
+                if target_fps <= 0:
+                    return 0.0
+                target_dt = 1.0 / target_fps
+                now = time.perf_counter()
+                elapsed = now - self._last_frame_time
+                if elapsed < target_dt:
+                    time.sleep(target_dt - elapsed)
+                new_now = time.perf_counter()
+                dt = new_now - self._last_frame_time
+                self._last_frame_time = new_now
+                return dt
+
+            return RockstarModule('time', {
+                'now': NativeFunction('time.now', lambda: time.time()),
+                'wait': NativeFunction('time.wait', lambda sec: time.sleep(sec)),
+                'fps': NativeFunction('time.fps', fps_limiter),
+            }), None
+
+        if mod_name == 'thread':
+            def spawn_thread(mission_fn, *args):
+                if not isinstance(mission_fn, RockstarFunction):
+                    raise TypeError("thread.run() requires a 'new_mission' function as first argument")
+
+                def worker():
+                    # Execute on a dedicated child interpreter sharing global_symbols
+                    worker_interp = Interpreter(base_dir=self.base_dir)
+                    worker_interp.global_symbols = self.global_symbols
+                    worker_interp.scope_stack = [self.global_symbols]
+                    _, err = worker_interp._invoke_function(mission_fn, list(args))
+                    if err:
+                        print(f"[THREAD ERROR] {err}")
+
+                t = threading.Thread(target=worker, daemon=True)
+                t.start()
+                return t.name
+
+            return RockstarModule('thread', {
+                'run': NativeFunction('thread.run', spawn_thread),
+                'sleep': NativeFunction('thread.sleep', lambda sec: time.sleep(sec)),
+            }), None
+
+        if mod_name == 'json':
+            def json_save(filepath, data):
+                full_path = filepath if os.path.isabs(filepath) else os.path.join(self.base_dir, filepath)
+                with open(full_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4)
+                return True
+
+            def json_load(filepath):
+                full_path = filepath if os.path.isabs(filepath) else os.path.join(self.base_dir, filepath)
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+
+            return RockstarModule('json', {
+                'save': NativeFunction('json.save', json_save),
+                'load': NativeFunction('json.load', json_load),
+                'encode': NativeFunction('json.encode', lambda data: json.dumps(data)),
+                'decode': NativeFunction('json.decode', lambda text: json.loads(text)),
+            }), None
+
+        if mod_name == 'os':
+            def resolve_path(p):
+                return p if os.path.isabs(p) else os.path.join(self.base_dir, p)
+
+            return RockstarModule('os', {
+                'exists': NativeFunction('os.exists', lambda p: os.path.exists(resolve_path(p))),
+                'mkdir': NativeFunction('os.mkdir', lambda p: os.makedirs(resolve_path(p), exist_ok=True)),
+                'remove': NativeFunction('os.remove', lambda p: os.remove(resolve_path(p)) if os.path.exists(resolve_path(p)) else None),
+                'clear': NativeFunction('os.clear', lambda: os.system('cls' if os.name == 'nt' else 'clear')),
+                'cwd': NativeFunction('os.cwd', lambda: os.getcwd()),
+            }), None
+
+        if mod_name == 'sys':
+            def clean_exit(code=0):
+                sys.exit(code)
+
+            return RockstarModule('sys', {
+                'args': NativeFunction('sys.args', lambda: list(sys.argv[1:])),
+                'exit': NativeFunction('sys.exit', clean_exit),
+                'platform': sys.platform,
+            }), None
+
+        return None, f"WASTED! ImportError: Unknown module '{mod_name}'"
+
     def visit(self, node):
-        """Dynamically dispatches execution to the appropriate visit_<NodeType> method."""
         method_name = f'visit_{type(node).__name__}'
         method = getattr(self, method_name)
         return method(node)
+
+    def visit_HireNode(self, node):
+        if not node.is_file:
+            mod_name = node.target_tok.value
+            mod_obj, error = self._build_stdlib_module(mod_name)
+            if error:
+                return None, error
+            self.current_scope[mod_name] = mod_obj
+            return mod_obj, None
+
+        # Import external .rsl file into current symbol scope
+        rel_path = node.target_tok.value
+        full_path = rel_path if os.path.isabs(rel_path) else os.path.join(self.base_dir, rel_path)
+        if not os.path.exists(full_path):
+            return None, f"WASTED! ImportError: Mission file '{rel_path}' not found"
+
+        with open(full_path, 'r', encoding='utf-8') as f:
+            ext_code = f.read()
+
+        lexer = Lexer(ext_code)
+        tokens, error = lexer.make_tokens()
+        if error:
+            return None, error
+
+        parser = Parser(tokens)
+        ast, error = parser.parse()
+        if error:
+            return None, error
+
+        for stmt in ast:
+            _, error = self.visit(stmt)
+            if error:
+                return None, error
+
+        return None, None
 
     def visit_NumberNode(self, node):
         return node.tok.value, None
@@ -1140,11 +1489,9 @@ class Interpreter:
             return None, f"WASTED! LookupError: {exc}"
 
     def visit_IndexAssignNode(self, node):
-        var_name = node.var_name_tok.value
-        container, found = self.get_var(var_name)
-        if not found:
-            return None, f"WASTED! NameError: Heist variable '{var_name}' is not defined"
-
+        container, error = self.visit(node.target_node)
+        if error:
+            return None, error
         index, error = self.visit(node.index_node)
         if error:
             return None, error
@@ -1157,6 +1504,108 @@ class Interpreter:
             return val, None
         except (IndexError, KeyError, TypeError) as exc:
             return None, f"WASTED! AssignmentError: {exc}"
+
+    def visit_MemberAccessNode(self, node):
+        target, error = self.visit(node.target_node)
+        if error:
+            return None, error
+        member_name = node.member_tok.value
+
+        if isinstance(target, RockstarModule):
+            if member_name in target.members:
+                return target.members[member_name], None
+            return None, f"WASTED! AttributeError: Module '{target.name}' has no member '{member_name}'"
+
+        if isinstance(target, RockstarInstance):
+            if member_name in target.fields:
+                return target.fields[member_name], None
+            if member_name in target.methods:
+                raw_fn = target.methods[member_name]
+                return RockstarFunction(
+                    raw_fn.name,
+                    raw_fn.arg_names,
+                    raw_fn.body_nodes,
+                    bound_instance=target
+                ), None
+            return None, f"WASTED! AttributeError: '{target.type_name}' has no member '{member_name}'"
+
+        return None, f"WASTED! TypeError: Cannot access '.{member_name}' on '{target}'"
+
+    def visit_MemberAssignNode(self, node):
+        target, error = self.visit(node.target_node)
+        if error:
+            return None, error
+        val, error = self.visit(node.value_node)
+        if error:
+            return None, error
+        member_name = node.member_tok.value
+
+        if isinstance(target, RockstarInstance):
+            target.fields[member_name] = val
+            return val, None
+
+        return None, f"WASTED! TypeError: Cannot assign '.{member_name}' on '{target}'"
+
+    def visit_StructDefNode(self, node):
+        struct_name = node.struct_name_tok.value
+        field_names = [tok.value for tok in node.field_toks]
+        struct_obj = RockstarStruct(struct_name, field_names)
+        self.current_scope[struct_name] = struct_obj
+        return struct_obj, None
+
+    def visit_ClassDefNode(self, node):
+        class_name = node.class_name_tok.value
+        methods = {}
+        for m_node in node.method_nodes:
+            m_name = m_node.func_name_tok.value
+            m_args = [tok.value for tok in m_node.arg_name_toks]
+            methods[m_name] = RockstarFunction(m_name, m_args, m_node.body_nodes)
+
+        class_obj = RockstarClass(class_name, methods)
+        self.current_scope[class_name] = class_obj
+        return class_obj, None
+
+    def visit_RecruitNode(self, node):
+        type_name = node.class_name_tok.value
+        blueprint_or_class, found = self.get_var(type_name)
+        if not found:
+            return None, f"WASTED! NameError: Gang or blueprint '{type_name}' is not defined"
+
+        evaluated_args = []
+        for arg_node in node.arg_nodes:
+            val, error = self.visit(arg_node)
+            if error:
+                return None, error
+            evaluated_args.append(val)
+
+        if isinstance(blueprint_or_class, RockstarStruct):
+            if len(evaluated_args) != len(blueprint_or_class.field_names):
+                return None, (
+                    f"WASTED! ArgumentError: Blueprint '{type_name}' expects "
+                    f"{len(blueprint_or_class.field_names)} fields, got {len(evaluated_args)}"
+                )
+            fields = dict(zip(blueprint_or_class.field_names, evaluated_args))
+            return RockstarInstance(type_name, initial_fields=fields), None
+
+        if isinstance(blueprint_or_class, RockstarClass):
+            instance = RockstarInstance(type_name, methods=blueprint_or_class.methods)
+            if 'spawn' in blueprint_or_class.methods:
+                spawn_fn = blueprint_or_class.methods['spawn']
+                bound_spawn = RockstarFunction(
+                    spawn_fn.name,
+                    spawn_fn.arg_names,
+                    spawn_fn.body_nodes,
+                    bound_instance=instance
+                )
+                _, error = self._invoke_function(bound_spawn, evaluated_args)
+                if error:
+                    return None, error
+            elif evaluated_args:
+                return None, f"WASTED! ArgumentError: Gang '{type_name}' has no 'spawn' constructor"
+
+            return instance, None
+
+        return None, f"WASTED! TypeError: '{type_name}' cannot be recruited"
 
     def visit_BinOpNode(self, node):
         left, error = self.visit(node.left_node)
@@ -1288,29 +1737,25 @@ class Interpreter:
         self.current_scope[func_name] = func_obj
         return func_obj, None
 
-    def visit_FuncCallNode(self, node):
-        func_obj, error = self.visit(node.node_to_call)
-        if error:
-            return None, error
+    def _invoke_function(self, func_obj, evaluated_args):
+        all_args = (
+            [func_obj.bound_instance] + evaluated_args
+            if func_obj.bound_instance is not None
+            else evaluated_args
+        )
 
-        if not isinstance(func_obj, RockstarFunction):
-            return None, f"WASTED! TypeError: '{func_obj}' is not a callable mission"
-
-        if len(node.arg_nodes) != len(func_obj.arg_names):
+        if len(all_args) != len(func_obj.arg_names):
+            expected_count = (
+                len(func_obj.arg_names) - 1
+                if func_obj.bound_instance is not None
+                else len(func_obj.arg_names)
+            )
             return None, (
                 f"WASTED! ArgumentError: Mission '{func_obj.name}' expects "
-                f"{len(func_obj.arg_names)} arguments, got {len(node.arg_nodes)}"
+                f"{expected_count} arguments, got {len(evaluated_args)}"
             )
 
-        evaluated_args = []
-        for arg_node in node.arg_nodes:
-            val, error = self.visit(arg_node)
-            if error:
-                return None, error
-            evaluated_args.append(val)
-
-        # Create isolated local call frame
-        local_scope = dict(zip(func_obj.arg_names, evaluated_args))
+        local_scope = dict(zip(func_obj.arg_names, all_args))
         self.scope_stack.append(local_scope)
 
         return_val = None
@@ -1326,6 +1771,29 @@ class Interpreter:
 
         return return_val, None
 
+    def visit_FuncCallNode(self, node):
+        callable_obj, error = self.visit(node.node_to_call)
+        if error:
+            return None, error
+
+        evaluated_args = []
+        for arg_node in node.arg_nodes:
+            val, error = self.visit(arg_node)
+            if error:
+                return None, error
+            evaluated_args.append(val)
+
+        if isinstance(callable_obj, NativeFunction):
+            try:
+                return callable_obj.py_func(*evaluated_args), None
+            except Exception as exc:
+                return None, f"WASTED! NativeMissionError ({callable_obj.name}): {exc}"
+
+        if isinstance(callable_obj, RockstarFunction):
+            return self._invoke_function(callable_obj, evaluated_args)
+
+        return None, f"WASTED! TypeError: '{callable_obj}' is not a callable mission"
+
     def visit_ReturnNode(self, node):
         val = None
         if node.value_node is not None:
@@ -1339,7 +1807,7 @@ class Interpreter:
 # 7. EXECUTION PIPELINE ENTRY POINT
 # ==============================================================================
 
-def run(text):
+def run(text, base_dir="/storage/emulated/0/Coding/rockstarlang"):
     """Executes the full Lexer -> Parser -> Interpreter pipeline on source text."""
     lexer = Lexer(text)
     tokens, error = lexer.make_tokens()
@@ -1351,7 +1819,7 @@ def run(text):
     if error:
         return None, error
 
-    interpreter = Interpreter()
+    interpreter = Interpreter(base_dir=base_dir)
     for stmt in ast:
         try:
             _, error = interpreter.visit(stmt)
