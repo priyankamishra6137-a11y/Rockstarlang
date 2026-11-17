@@ -19,7 +19,6 @@ def main():
         print(f"WASTED! File '{filename}' not found.")
         return
 
-    # Apne Lexer/Parser ko file ka poora text bhejo
     result, error = Core.run(source_code)
 
     if error:

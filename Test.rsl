@@ -1,3 +1,19 @@
 GTA52013
-    call_CJ (76.8+6)
+    RDR2 Define payout calculation mission
+    new_mission split_payout(total_loot, crew_count):
+        wanted crew_count <= 0:
+            loot 0
+        loot total_loot / crew_count
+
+    heist crew = stash["Michael", "Franklin", "Trevor"] RDR2 Main heist crew
+    heist vault = dossier{"target": "Union Depository", "gold": 1500000, "heat": 3}
+
+    call_CJ ("Target:", vault["target"])
+    on_the_run vault["heat"] > 0:
+        call_CJ ("Evading cops... Stars left:", vault["heat"])
+        heist vault["heat"] = vault["heat"] - 1
+
+    heist cut = split_payout(vault["gold"], 3)
+    call_CJ ("Mission Passed! Each member gets:", cut)
+    call_CJ ("Lead Driver:", crew[1])
 GTA62026
